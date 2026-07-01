@@ -1,4 +1,5 @@
 import io
+import os
 import json
 import logging
 import zipfile
@@ -7,6 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+from google.cloud.bigquery.client import Client
+import pandas_gbq
 
 # ---------------------------------------------------------------------------
 # LOGGING
@@ -74,9 +77,6 @@ def extract_gtfs_files(
 
 # ---------------------------------------------------------------------------
 # STEP 3 — Basic cleaning per table
-# Keeps the raw layer genuinely raw (no business logic here),
-# but handles things that would break downstream loads:
-# stripped whitespace, standardised nulls, correct dtypes on key columns.
 # ---------------------------------------------------------------------------
 def clean_routes(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = df.columns.str.strip()
@@ -94,7 +94,7 @@ def clean_stops(df: pd.DataFrame) -> pd.DataFrame:
     df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
     df["stop_lat"] = pd.to_numeric(df["stop_lat"], errors="coerce")
     df["stop_lon"] = pd.to_numeric(df["stop_lon"], errors="coerce")
-    # Flag stops missing coordinates — useful for data quality testing later in dbt
+    # Flag stops missing coordinates
     df["_has_coordinates"] = df["stop_lat"].notna() & df["stop_lon"].notna()
     return df
 
@@ -112,7 +112,6 @@ def clean_stop_times(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = df.columns.str.strip()
     df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
     # stop_sequence is numeric; arrival/departure kept as strings
-    # because GTFS allows times like 25:30:00 (next day), which aren't valid ISO times
     df["stop_sequence"] = pd.to_numeric(df["stop_sequence"], errors="coerce")
     return df
 
@@ -123,7 +122,7 @@ def clean_calendar(df: pd.DataFrame) -> pd.DataFrame:
     # Convert GTFS date strings (YYYYMMDD) to proper dates
     for col in ["start_date", "end_date"]:
         if col in df.columns:
-            df[col] = pd.to_datetime(df[col], format="%Y%m%d", errors="coerce")
+            df[col] = pd.to_datetime(df[col], format="%Y-%m-%d", errors="coerce")
     day_cols = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
     for col in day_cols:
         if col in df.columns:
@@ -134,7 +133,7 @@ def clean_calendar(df: pd.DataFrame) -> pd.DataFrame:
 def clean_calendar_dates(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = df.columns.str.strip()
     df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
-    df["date"] = pd.to_datetime(df["date"], format="%Y%m%d", errors="coerce")
+    df["date"] = pd.to_datetime(df["date"], format="%Y-%m-%d", errors="coerce")
     # exception_type: 1 = service added, 2 = service removed
     df["exception_type"] = pd.to_numeric(df["exception_type"], errors="coerce")
     df["exception_label"] = df["exception_type"].map({1: "Added", 2: "Removed"})
@@ -165,14 +164,13 @@ def clean_all(dataframes: dict[str, pd.DataFrame], logger: logging.Logger) -> di
 
 # ---------------------------------------------------------------------------
 # STEP 4 — Save to local raw layer + write a run manifest (JSON)
-# The manifest records when the data was pulled and basic row counts.
-# This is the JSON your ingestion script writes; dbt can read it as a source.
 # ---------------------------------------------------------------------------
 def save_to_raw(
     dataframes: dict[str, pd.DataFrame],
     output_dir: str,
     logger: logging.Logger,
 ) -> dict:
+    
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     manifest = {
         "run_timestamp": datetime.utcnow().isoformat() + "Z",
@@ -199,7 +197,7 @@ def save_to_raw(
     return manifest
 
 # ---------------------------------------------------------------------------
-# STEP 5 — Print a quick summary to console (useful when demoing)
+# STEP 5 — Print a quick summary to console
 # ---------------------------------------------------------------------------
 def print_summary(manifest: dict, logger: logging.Logger) -> None:
     logger.info("=" * 55)
@@ -210,3 +208,25 @@ def print_summary(manifest: dict, logger: logging.Logger) -> None:
     for table, meta in manifest["tables"].items():
         logger.info(f"  {table:<20} {meta['rows']:>8,} rows   {len(meta['columns'])} cols")
     logger.info("=" * 55)
+
+# ---------------------------------------------------------------------------
+# STEP 6 — Ingest the raw data to BigQuery
+# ---------------------------------------------------------------------------
+def ingest_to_bigquery(
+    dataframes: dict[str, pd.DataFrame],
+    logger: logging.Logger,
+) -> None:
+    
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = 'service_account.json'
+    client = Client()
+    for name, df in dataframes.items():
+        table_id = f"{client.project}.google_transit.{name}"
+        
+        logger.info(f"Starting uploading table {table_id} to BigQuery...")
+        pandas_gbq.to_gbq(
+            dataframe=df,
+            destination_table=table_id,
+            if_exists='replace',
+            bigquery_client=client
+)
+        logger.info(f"Data successfully ingested into BigQuery table: {table_id}!")
