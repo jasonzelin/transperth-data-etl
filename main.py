@@ -67,6 +67,8 @@ def main():
     utils.print_summary(manifest, logger)
     logger.info("Ingestion complete ✓")
 
+    # 6. Ingest to BigQuery
+    utils.ingest_to_bigquery(dataframes, logger)
 
 if __name__ == "__main__":
     main()
