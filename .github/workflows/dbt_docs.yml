@@ -63,7 +63,7 @@ jobs:
           find dbt_transperth/models -name "*.yml" | sort
 
           echo "=== sources.yml content ==="
-          cat dbt_transperth/models/bronze/sources.yml
+          cat dbt_transperth/models/bronze/source.yml
 
       - name: Write service account key
         run: |
