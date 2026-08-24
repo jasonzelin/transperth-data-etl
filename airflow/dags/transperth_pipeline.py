@@ -85,8 +85,7 @@ with DAG(
         dataframes  = clean_all(dataframes, pipeline_logger)
         manifest    = save_to_raw(dataframes, config["output_dir"], pipeline_logger)
         print_summary(manifest, pipeline_logger)
-
-        # Push manifest to XCom so downstream tasks can reference it
+        
         context["ti"].xcom_push(key="manifest", value=manifest)
         logger.info("Ingestion complete ✓")
 
@@ -217,7 +216,6 @@ with DAG(
     # -----------------------------------------------------------------------
     # TASK 5 — Notify success
     # Logs a summary of the completed pipeline run.
-    # In production you'd replace this with a Slack or email notification.
     # -----------------------------------------------------------------------
     def notify_success(**context):
         logger   = logging.getLogger(__name__)
